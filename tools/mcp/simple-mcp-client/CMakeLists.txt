@@ -4,10 +4,10 @@ if(NOT TARGET mcp)
 endif()
 
 # Create your executable
-add_executable(simple-mcp-client main.cpp)
+add_executable(llama-simple-mcp-client simple-mcp-client.cpp)
 
 # Link required libraries
-target_link_libraries(simple-mcp-client PRIVATE 
+target_link_libraries(llama-simple-mcp-client PRIVATE 
     mcp        # MCP library
     llama      # llama.cpp core library
     common     # llama.cpp common utilities
@@ -15,7 +15,7 @@ target_link_libraries(simple-mcp-client PRIVATE
 )
 
 # Add source files if needed
-target_sources(simple-mcp-client PRIVATE
+target_sources(llama-simple-mcp-client PRIVATE
     ${CMAKE_SOURCE_DIR}/common/arg.cpp          # For command line parsing
     ${CMAKE_SOURCE_DIR}/common/sampling.cpp     # For text sampling
     ${CMAKE_SOURCE_DIR}/common/json-schema-to-grammar.cpp  # For JSON handling
@@ -23,7 +23,7 @@ target_sources(simple-mcp-client PRIVATE
 )
 
 # Include all necessary directories
-target_include_directories(simple-mcp-client PRIVATE
+target_include_directories(llama-simple-mcp-client PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/cpp-httplib    # For httplib.h
     ${CMAKE_SOURCE_DIR}/vendor/nlohmann       # For nlohmann/json.hpp
     ${CMAKE_SOURCE_DIR}/vendor/cpp-mcp/include
@@ -32,8 +32,8 @@ target_include_directories(simple-mcp-client PRIVATE
     ${CMAKE_SOURCE_DIR}/common
 )
 
-target_compile_features(simple-mcp-improved PRIVATE cxx_std_17)
+target_compile_features(llama-simple-mcp-client PRIVATE cxx_std_17)
 
 if (WIN32)
-    target_link_libraries(simple-mcp-improved PRIVATE ws2_32)
+    target_link_libraries(llama-simple-mcp-client PRIVATE ws2_32)
 endif() 

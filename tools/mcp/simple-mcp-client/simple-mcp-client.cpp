@@ -14,113 +14,107 @@
 #include <cstdlib>
 #include <array>
 #include <map>
+#include <sstream>
 
 using json = nlohmann::json;
 
+// Configuration for the client, holding server details
 struct Config {
-    // MCP Server Configs
     struct ServerConfig {
         std::string name;
         std::string host;
         int port;
-        std::string type;  // "vscode", "llama", "custom"
+        std::string type;
     };
     std::vector<ServerConfig> servers;
-    
-    // Client Config
     bool show_instructions = true;
-    bool show_details = true;
-    std::string history_path;
-} config;
+};
 
-// Represents a connected MCP server
-struct MCPServer {
+// Represents a single connected MCP server and its capabilities
+struct MCPServerConnection {
     std::string name;
     std::string type;
     std::unique_ptr<mcp::sse_client> client;
     std::vector<mcp::tool> tools;
 };
 
-// Global state
-std::vector<MCPServer> connected_servers;
-std::map<std::string, std::string> tool_to_server;  // Maps tool IDs to server names
+// Global state for the application
+std::vector<MCPServerConnection> connected_servers;
+std::map<std::string, std::string> tool_to_server_map; // Maps tool name to server name
 
+// Parses command-line arguments to configure servers
 static Config parse_config(int argc, char* argv[]) {
     Config config;
-    
-    // Default VSCode server
-    config.servers.push_back({"vscode", "localhost", 8080, "vscode"});
-    
+    // Add a default server for convenience
+    config.servers.push_back({"default-agent", "localhost", 8889, "llama-agent"});
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--add-server") == 0 && i + 3 < argc) {
+        if (strcmp(argv[i], "--add-server") == 0 && i + 4 < argc) {
             config.servers.push_back({
-                argv[i+1],  // name
-                argv[i+2],  // host
-                std::stoi(argv[i+3]),  // port
-                argv[i+4]   // type
+                argv[i+1], // name
+                argv[i+2], // host
+                std::stoi(argv[i+3]), // port
+                argv[i+4]  // type
             });
             i += 4;
         } else if (strcmp(argv[i], "--hide-instructions") == 0) {
             config.show_instructions = false;
-        } else if (strcmp(argv[i], "--hide-details") == 0) {
-            config.show_details = false;
         }
     }
     return config;
 }
 
-// Connect to an MCP server and discover its tools
-bool connect_to_server(const Config::ServerConfig& server_config, MCPServer& server) {
+// Establishes a connection to a configured MCP server
+bool connect_to_server(const Config::ServerConfig& server_config, MCPServerConnection& server) {
     try {
         server.name = server_config.name;
         server.type = server_config.type;
         server.client = std::make_unique<mcp::sse_client>(server_config.host, server_config.port);
-        
-        bool initialized = server.client->initialize(
-            "llama-mcp-client",  // client name
-            "0.1.0"             // version
-        );
-        
-        if (!initialized) {
-            std::cerr << "Failed to initialize connection to " << server.name << std::endl;
+        server.client->set_timeout(5); // 5 second timeout
+
+        if (!server.client->initialize("llama-mcp-client", "0.1.0")) {
+            fprintf(stderr, "Error: Failed to initialize connection to '%s' at %s:%d\n",
+                    server.name.c_str(), server_config.host.c_str(), server_config.port);
             return false;
         }
-        
-        // Discover tools
+
         server.tools = server.client->get_tools();
-        
-        // Map tools to this server
         for (const auto& tool : server.tools) {
-            tool_to_server[tool.name] = server.name;
+            tool_to_server_map[tool.name] = server.name;
         }
-        
-        std::cout << "Connected to " << server.name << " (" << server.tools.size() << " tools)" << std::endl;
+
+        printf("Successfully connected to '%s' (%zu tools found)\n", server.name.c_str(), server.tools.size());
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error connecting to " << server.name << ": " << e.what() << std::endl;
+        fprintf(stderr, "Error: Exception while connecting to '%s': %s\n", server.name.c_str(), e.what());
         return false;
     }
 }
 
-// Display available tools from all servers
+// Displays all available tools grouped by server
 void display_tools() {
-    std::cout << "\nAvailable Tools:\n";
+    printf("\n--- Available Tools ---\n");
+    if (tool_to_server_map.empty()) {
+        printf("No tools found on any connected servers.\n");
+        return;
+    }
     for (const auto& server : connected_servers) {
-        std::cout << "\n" << server.name << " (" << server.type << "):\n";
-        for (const auto& tool : server.tools) {
-            std::cout << "  - " << tool.name << ": " << tool.description << "\n";
+        if (!server.tools.empty()) {
+            printf("\nFrom server '%s' (%s):\n", server.name.c_str(), server.type.c_str());
+            for (const auto& tool : server.tools) {
+                printf("  - %s: %s\n", tool.name.c_str(), tool.description.c_str());
+            }
         }
     }
-    std::cout << std::endl;
+    printf("\n");
 }
 
-// Find server that owns a tool
-MCPServer* find_server_for_tool(const std::string& tool_name) {
-    auto it = tool_to_server.find(tool_name);
-    if (it == tool_to_server.end()) {
+// Finds the server connection responsible for a given tool
+MCPServerConnection* find_server_for_tool(const std::string& tool_name) {
+    auto it = tool_to_server_map.find(tool_name);
+    if (it == tool_to_server_map.end()) {
         return nullptr;
     }
-    
     for (auto& server : connected_servers) {
         if (server.name == it->second) {
             return &server;
@@ -129,95 +123,105 @@ MCPServer* find_server_for_tool(const std::string& tool_name) {
     return nullptr;
 }
 
-// Execute a tool on its server
-bool execute_tool(const std::string& tool_name, const json& args) {
+// Executes a tool call on the appropriate server
+void execute_tool(const std::string& tool_name, const json& args) {
     auto* server = find_server_for_tool(tool_name);
     if (!server) {
-        std::cerr << "Tool " << tool_name << " not found" << std::endl;
-        return false;
+        fprintf(stderr, "Error: Tool '%s' not found on any connected server.\n", tool_name.c_str());
+        return;
     }
-    
+
+    printf("Executing tool '%s' on server '%s'...\n", tool_name.c_str(), server->name.c_str());
     try {
         json result = server->client->call_tool(tool_name, args);
-        std::cout << "\nResult from " << server->name << ":\n" << result.dump(2) << std::endl;
-        return true;
+        printf("\nResult:\n%s\n", result.dump(2).c_str());
     } catch (const std::exception& e) {
-        std::cerr << "Error executing tool: " << e.what() << std::endl;
-        return false;
+        fprintf(stderr, "Error: Exception during tool execution: %s\n", e.what());
     }
 }
 
-// Interactive TUI mode
-void run_interactive_mode() {
-    std::cout << "\nMCP Client Interactive Mode\n";
+// The main interactive command loop
+void run_interactive_mode(const Config& config) {
     if (config.show_instructions) {
-        std::cout << "\nInstructions:"
-                  << "\n- Type 'tools' to list available tools"
-                  << "\n- Type 'tool <name> <args_json>' to execute a tool"
-                  << "\n- Type 'servers' to list connected servers"
-                  << "\n- Type 'quit' to exit"
-                  << "\n";
+        printf("\n--- MCP Client Interactive Mode ---\n");
+        printf("Commands:\n");
+        printf("  - tools                            List all available tools.\n");
+        printf("  - tool <name> <json_args>          Execute a tool (e.g., tool calculator '{\"expression\":\"2+2\"}').\n");
+        printf("  - servers                          List all connected servers.\n");
+        printf("  - help                             Show this help message.\n");
+        printf("  - exit                             Quit the client.\n");
     }
-    
+
     std::string line;
     while (true) {
-        std::cout << "\n> ";
+        printf("\nmcp> ");
         std::getline(std::cin, line);
-        
-        if (line == "quit" || line == "exit") {
+        if (line.empty()) continue;
+
+        std::stringstream ss(line);
+        std::string command;
+        ss >> command;
+
+        if (command == "exit" || command == "quit") {
             break;
-        } else if (line == "tools") {
+        } else if (command == "tools") {
             display_tools();
-        } else if (line == "servers") {
-            std::cout << "\nConnected Servers:\n";
+        } else if (command == "servers") {
+            printf("\n--- Connected Servers ---\n");
             for (const auto& server : connected_servers) {
-                std::cout << "- " << server.name << " (" << server.type << ")\n";
+                printf("- %s (%s) at %s:%d\n", server.name.c_str(), server.type.c_str(), server.client->get_host().c_str(), server.client->get_port());
             }
-        } else if (line.substr(0, 5) == "tool ") {
-            // Parse tool name and args
-            std::string rest = line.substr(5);
-            size_t space = rest.find(' ');
-            if (space == std::string::npos) {
-                std::cerr << "Usage: tool <name> <args_json>" << std::endl;
+        } else if (command == "tool") {
+            std::string tool_name;
+            ss >> tool_name;
+            if (tool_name.empty()) {
+                fprintf(stderr, "Error: Tool name is required. Usage: tool <name> <json_args>\n");
                 continue;
             }
-            
-            std::string tool_name = rest.substr(0, space);
-            std::string args_str = rest.substr(space + 1);
-            
-            try {
-                json args = json::parse(args_str);
-                execute_tool(tool_name, args);
-            } catch (const std::exception& e) {
-                std::cerr << "Error parsing args: " << e.what() << std::endl;
+
+            std::string args_str;
+            std::getline(ss, args_str);
+            // Trim leading whitespace from args
+            args_str.erase(0, args_str.find_first_not_of(" \t\n\r"));
+
+            json args;
+            if (args_str.empty()) {
+                args = json::object(); // No args provided
+            } else {
+                try {
+                    args = json::parse(args_str);
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "Error: Invalid JSON arguments: %s\n", e.what());
+                    continue;
+                }
             }
-        } else {
-            std::cout << "Unknown command. Type 'tools' for available tools." << std::endl;
+            execute_tool(tool_name, args);
+        } else if (command == "help") {
+             run_interactive_mode({true}); // Show instructions again
+        }else {
+            fprintf(stderr, "Unknown command: '%s'. Type 'help' for a list of commands.\n", command.c_str());
         }
     }
 }
 
 int main(int argc, char** argv) {
-    config = parse_config(argc, argv);
-    
-    // Connect to configured servers
+    Config config = parse_config(argc, argv);
+
+    printf("Starting MCP client...\n");
     for (const auto& server_config : config.servers) {
-        MCPServer server;
+        MCPServerConnection server;
         if (connect_to_server(server_config, server)) {
             connected_servers.push_back(std::move(server));
         }
     }
-    
+
     if (connected_servers.empty()) {
-        std::cerr << "No servers connected. Exiting." << std::endl;
+        fprintf(stderr, "\nFatal: No servers could be connected. Please check your server configurations.\n");
         return 1;
     }
-    
-    // Show initial tool list
-    display_tools();
-    
-    // Enter interactive mode
-    run_interactive_mode();
-    
+
+    run_interactive_mode(config);
+
+    printf("Exiting MCP client.\n");
     return 0;
-} 
+}
